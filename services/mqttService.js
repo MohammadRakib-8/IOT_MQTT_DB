@@ -14,44 +14,50 @@ function startMQTT() {
 
 const data = JSON.parse(message.toString());
 const deviceId=data.mac;
-const timestamp = data.time ? new Date(data.time * 1000) : new Date();
+const timestamp=new Date().toLocaleString("en-US", {
+  timeZone: "Asia/Dhaka"
+});
+const deviceTime = data.time ? new Date(data.time * 1000) : new Date();
+
 
 console.log(data);
-// console.log(data.connectivity);
+// console.log(data.Connectivity);
 
 
 if(!deviceId) return;
 
 
 const rawData=`INSERT INTO 
-dems_raw_data_logs(device_id,raw_data,insert_time)
-VALUES ($1, $2, $3)`;
+dems_raw_data_logs(device_id,raw_data,device_time,created_at)
+VALUES ($1, $2, $3,$4)`;
 
 await db.query(rawData, [
   data.mac,
   JSON.stringify(data),
-  new Date()
+deviceTime,
+timestamp
 ]);
 
 const heartbeatData = `INSERT INTO
-dems_device_heartbeat(device_mac,connectivity,insert_time)
+dems_device_heartbeat(device_mac,connectivity,created_at)
 VALUES ($1, $2, $3)`;
 
+// const conn=data.Connectivity;
+// console.log("Connectivity data inserted///////////////".$conn);
 
-if(data.connectivity=="online"||data.connectivity=="offline"){
+if(data.Connectivity=="online"||data.Connectivity=="offline"){
 await db.query(heartbeatData, [
   data.mac,
-  data.connectivity,
-  new Date()
+  data.Connectivity,
+  timestamp
 ]);
 
 
 }
 
-
 const cleanData=`INSERT INTO 
-dems_sensor_clean_logs(device_id,sensor_type,sensor_num,sensor_value,alert,insert_time)
-VALUES($1,$2,$3,$4,$5,$6)`;
+dems_sensor_clean_logs(device_id,sensor_type,sensor_num,sensor_value,alert,device_time,created_at)
+VALUES($1,$2,$3,$4,$5,$6,$7)`;
 
 
 if(data.mq2!==undefined){
@@ -61,24 +67,22 @@ if(data.mq2!==undefined){
     data.Sid,
     data.mq2,
     0,
+    deviceTime,
     timestamp
-
-
   ]
 
   )
 }
 
-
-
 if(data.DemsHum!==undefined){
     await db.query(cleanData,[
       data.mac,
       "h",
-      data.sid,
+      data.Sid,
       data.DemsHum,
       0,
-      timestamp
+   deviceTime,
+   timestamp
 
     ])
   }
@@ -87,11 +91,12 @@ if(data.DemsHum!==undefined){
   if(data.DemsTemp!==undefined){
     await db.query(cleanData,[
       data.mac,
-      "h",
-      data.sid,
+      "t",
+      data.Sid,
       data.DemsTemp,
       0,
-      timestamp
+      deviceTime,
+   timestamp
 
     ])
   }
@@ -177,8 +182,6 @@ if(data.DemsHum!==undefined){
 //         mq2,
 //         timestamp
 //       ]);
-
-
       console.log(" Data inserted:", deviceId);
 
     } catch (err) {
