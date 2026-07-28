@@ -1,24 +1,3 @@
-// const mysql = require("mysql2");
-// require("dotenv").config();
-
-// const db = mysql.createConnection({
-//     host: process.env.DB_HOST,
-//     user: process.env.DB_USER,
-//     password: process.env.DB_PASSWORD,
-//     database: process.env.DB_NAME,
-//     port: process.env.DB_PORT
-// });
-
-// db.connect((err) => {
-//     if (err) {
-//         console.log("DB Error", err);
-//         return;
-//     }
-//     console.log("MySQL Connected");
-// });
-
-// module.exports = db;
-
 
 require("dotenv").config();
 const { Pool } = require("pg");
@@ -33,8 +12,15 @@ const pool = new Pool({
     ssl: false,
 });
 
-pool.on("connect", () => {
-    console.log("PostgreSQL Connected");
+// pool.on("connect", () => {
+//     console.log("PostgreSQL Connected");
+// });
+
+pool.on("connect", (client) => {
+    console.log("New PostgreSQL connection created");
+    console.log("Total connections:", pool.totalCount);
+    console.log("Idle connections:", pool.idleCount);
+    console.log("Waiting requests:", pool.waitingCount);
 });
 
 pool.on("error", (err) => {
