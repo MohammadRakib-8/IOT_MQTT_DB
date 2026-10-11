@@ -94,88 +94,20 @@ async function insertRawAndHeartbeat(connection, data, deviceId, deviceTime) {
   }
 }
 
-// // Threshold Evaluation (Fast, Non-Blocking)
-
-// async function evaluateThresholds(pgConnection, deviceIdMac, sensorType, sensorNum, sensorValue, deviceTime) {
-//   if (sensorValue === null || sensorValue === undefined) return;
-
-//   const configsQuery = `
-//     SELECT sc.id as sensor_config_id, sc.user_id, d.id as device_id, sc.min_threshold, sc.max_threshold
-//     FROM sensor_configs sc
-//     JOIN devices d ON sc.device_id = d.id
-//     WHERE d.device_mac = ? AND sc.sensor_type = ? AND sc.sensor_num = ? AND sc.is_active = 1
-//     AND CURTIME() BETWEEN sc.schedule_start AND sc.schedule_end
-//   `;
-  
-//   try {
-//     const [configsRows] = await mysqlPool.query(configsQuery, [deviceIdMac, sensorType, String(sensorNum)]);
-//     if (configsRows.length === 0) return;
-
-//     for (const config of configsRows) {
-//       if (sensorValue < config.min_threshold || sensorValue > config.max_threshold) {
-//         const insertAlertQuery = `
-//           INSERT INTO device_alerts (
-//             user_id, device_id, sensor_config_id, sensor_type, sensor_num, 
-//             sensor_value, alert, is_notification_sent, alert_type, send_to, notification_attempt, triggered_at, created_at, updated_at
-//           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())
-//           RETURNING id
-//         `;
-        
-//         const inserted = await pgConnection.query(insertAlertQuery, [
-//           config.user_id, config.device_id, config.sensor_config_id,
-//           sensorType, String(sensorNum), sensorValue,
-//           true, false, 'app', null, 0, deviceTime
-//         ]);
-        
-//         const alertId = inserted.rows && inserted.rows[0] ? inserted.rows[0].id : null;
-
-//         // INSTANTLY NOTIFY LARAVEL VIA REDIS
-//         if (alertId) {
-//           // MUST use 'laravel_database_' prefix so Laravel hears it!
-//           await redis.publish("dems_alert_channel", JSON.stringify({
-//             alert_id: alertId, user_id: config.user_id, device_id: config.device_id
-//           }));
-//           console.log(`🚨 [ALERT SAVED] ID: ${alertId} | 📡 [REDIS PUBLISHED]`);
-//         }
-//       }
-//     }
-//   } catch (dbErr) {
-//     console.error(`[Threshold DB Error]`, dbErr.message);
-//   }
-// }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// Threshold Evaluation (With Redis Publish)
+// Threshold Evaluation (With Redis Publish & 15-Minute Cooldown)
 
 async function evaluateThresholds(pgConnection, deviceIdMac, sensorType, sensorNum, sensorValue, deviceTime) {
   if (sensorValue === null || sensorValue === undefined) return;
 
   const configsQuery = `
-    SELECT sc.id as sensor_config_id, sc.user_id, d.id as device_id, sc.min_threshold, sc.max_threshold
+    SELECT sc.id as sensor_config_id, sc.user_id, d.id as device_id, sc.min_threshold, sc.max_threshold, sc.is_active
     FROM sensor_configs sc
     JOIN devices d ON sc.device_id = d.id
-    WHERE d.device_mac = ? AND sc.sensor_type = ? AND sc.sensor_num = ? AND sc.is_active = 1
-    AND CURTIME() BETWEEN sc.schedule_start AND sc.schedule_end
+    WHERE d.device_mac = ? 
+      AND sc.sensor_type = ? 
+      AND sc.sensor_num = ? 
+      AND sc.is_active = 1
+      AND CURTIME() BETWEEN sc.schedule_start AND sc.schedule_end
   `;
   
   try {
@@ -183,35 +115,54 @@ async function evaluateThresholds(pgConnection, deviceIdMac, sensorType, sensorN
     if (configsRows.length === 0) return;
 
     for (const config of configsRows) {
+      // Safety check
+      if (!config.is_active || Number(config.is_active) !== 1) continue;
+
       if (sensorValue < config.min_threshold || sensorValue > config.max_threshold) {
-        //
         
+        // 15 MINUTE COOLDOWN LOGIC USING REDIS
+        // Include thresholds in the cooldown key to bypass old cooldowns immediately when the config is changed
+        const cooldownKey = `alert:cooldown:${config.device_id}:${config.sensor_config_id}:${config.min_threshold}:${config.max_threshold}`;
+        const isOnCooldown = await redis.exists(cooldownKey);
+        
+        if (isOnCooldown) {
+          // Alert was triggered recently for this specific sensor config, skip DB insert
+          continue;
+        }
+
         const insertAlertQuery = `
           INSERT INTO device_alerts (
             user_id, device_id, sensor_config_id, sensor_type, sensor_num, 
-            sensor_value, alert, is_notification_sent, alert_type, send_to, notification_attempt, triggered_at, created_at, updated_at
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())
+            sensor_value, alert, is_notification_sent, alert_type, triggered_at, created_at, updated_at,
+            min_threshold, max_threshold
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW(), $11, $12)
           RETURNING id
         `;
         
         const inserted = await pgConnection.query(insertAlertQuery, [
-          config.user_id, config.device_id, config.sensor_config_id,
-          sensorType, String(sensorNum), sensorValue,
-          true, false, 'app', null, 0, deviceTime
+          config.user_id, 
+          config.device_id, 
+          config.sensor_config_id,
+          sensorType, 
+          String(sensorNum), 
+          sensorValue,
+          true,         // alert
+          false,        // is_notification_sent
+          'Not set',    // alert_type
+          deviceTime,   // triggered_at
+          config.min_threshold,
+          config.max_threshold
         ]);
         
         const alertId = inserted.rows && inserted.rows[0] ? inserted.rows[0].id : null;
 
         if (alertId) {
-          console.log(`🚨 [ALERT SAVED] ID: ${alertId} | Device: ${deviceIdMac} | Sensor: ${sensorType}#${sensorNum}`);
+          // SET COOLDOWN IN REDIS FOR 15 MINUTES (900 seconds)
+          await redis.set(cooldownKey, alertId, 'EX', 901);
+          
+          console.log(`🚨 [ALERT SAVED] ID: ${alertId} | Device: ${deviceIdMac} | Sensor: ${sensorType}#${sensorNum} | Cooldown activated for 15 mins`);
           
           // PUBLISH TO REDIS FOR LARAVEL TO LISTEN
-          // await redis.publish("dems_alert_channel", JSON.stringify({
-          //   alert_id: alertId, user_id: config.user_id, device_id: config.device_id
-          // }));
-
-
-                  // PUBLISH TO REDIS FOR LARAVEL TO LISTEN
           await redis.publish("dems_alert_channel", JSON.stringify({
             alert_id: alertId, 
             user_id: config.user_id, 
@@ -227,12 +178,6 @@ async function evaluateThresholds(pgConnection, deviceIdMac, sensorType, sensorN
     console.error(`[Threshold DB Error]`, dbErr.message);
   }
 }
-
-
-
-
-
-
 
 // MQTT Listener
 
